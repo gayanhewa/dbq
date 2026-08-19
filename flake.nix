@@ -29,6 +29,12 @@
             pymysql
             python-dotenv
           ];
+          # Ship the agent skill so consumers can link it into their skills
+          # dir straight out of the store instead of vendoring a copy.
+          postInstall = ''
+            mkdir -p $out/share/dbq
+            cp -r $src/skills $out/share/dbq/
+          '';
         };
         default = dbq;
       });
