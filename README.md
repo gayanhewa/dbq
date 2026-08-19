@@ -111,6 +111,20 @@ nothing, so "no matches" never looks like "the query failed".
 `--max-rows` defaults to 100; when it truncates it says so in the header rather
 than silently cutting.
 
+## Agent skill
+
+`skills/dbq/SKILL.md` is a ready-made skill for coding agents (written for
+Claude Code, portable to anything that takes markdown instructions). It
+teaches the discipline the tool assumes: use profiles instead of pasting
+credentials, `--describe` before writing SQL against an unseen table, how to
+read toon output, and that `count: 0` is an answer rather than a failure.
+
+To use it with Claude Code, copy or symlink the directory into your skills:
+
+```bash
+ln -s "$(pwd)/skills/dbq" ~/.claude/skills/dbq
+```
+
 ## Notes
 
 - Credentials are never written anywhere. The DSN is held in memory for one
