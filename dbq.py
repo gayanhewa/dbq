@@ -1,9 +1,12 @@
-"""dbq — run read-only SQL against Oracle or MySQL and print toon or json.
+"""dbq — run read-only SQL against Oracle, MySQL, Postgres or SQL Server and
+print toon or json.
 
-Read-only is enforced by the database, not by inspecting the SQL: every query
-runs inside a read-only transaction, so a write fails server-side even if the
-account has permission. The statement check on top of that only exists to fail
-fast with a clearer message than the driver would give.
+Read-only is enforced by the database where it can be: on Oracle, MySQL and
+Postgres every query runs inside a read-only transaction, so a write fails
+server-side even if the account has permission. SQL Server has no read-only
+transaction mode, so there the query runs in a transaction that is always
+rolled back and the statement check is the only guard. The statement check
+otherwise exists to fail fast with a clearer message than the driver would give.
 
 Credentials are never written anywhere. A profile either carries a dsn inline
 or names an existing .env to read it from, and the value is held in memory for
@@ -22,6 +25,15 @@ Config: ~/.config/dbq/config.toml (override with DBQ_CONFIG)
     [profiles.local]
     driver = "mysql"
     dsn    = "mysql://user:pw@127.0.0.1:3306/app"
+
+    [profiles.pg]
+    driver = "postgres"
+    dsn    = "postgres://user:pw@127.0.0.1:5432/app"    # or postgresql://
+
+    [profiles.mssql]
+    driver = "sqlserver"
+    dsn    = "Server=db.example.com,1433;Database=app;User Id=user;Password=pw"
+    # or mssql://user:pw@db.example.com/app, or sqlserver://...
 """
 
 import argparse
@@ -36,6 +48,8 @@ from urllib.parse import unquote, urlparse
 CONFIG_PATH = Path(os.environ.get("DBQ_CONFIG", "~/.config/dbq/config.toml")).expanduser()
 DEFAULT_MAX_ROWS = 100
 DEFAULT_TIMEOUT = 30
+DEFAULT_PORTS = {"oracle": 1521, "mysql": 3306, "postgres": 5432, "sqlserver": 1433}
+DRIVERS = tuple(DEFAULT_PORTS)
 
 
 class DbqError(Exception):
@@ -77,9 +91,9 @@ def resolve_profile(cfg, args):
             p[key] = val
 
     if not p.get("driver"):
-        raise DbqError("no driver set. use --driver oracle|mysql or set it in the profile")
-    if p["driver"] not in ("oracle", "mysql"):
-        raise DbqError(f"unsupported driver {p['driver']!r}, expected oracle or mysql")
+        raise DbqError(f"no driver set. use --driver {'|'.join(DRIVERS)} or set it in the profile")
+    if p["driver"] not in DRIVERS:
+        raise DbqError(f"unsupported driver {p['driver']!r}, expected one of {', '.join(DRIVERS)}")
     p["name"] = name or "<ad-hoc>"
     return p
 
@@ -118,6 +132,7 @@ _ALIASES = {
     "data source": "target", "datasource": "target", "server": "host",
     "host": "host", "port": "port", "database": "database",
     "initial catalog": "database", "service name": "service",
+    "integrated security": "trusted", "trusted_connection": "trusted",
 }
 
 
@@ -148,9 +163,19 @@ def parse_dsn(dsn, driver):
         }
     elif "=" in dsn and ";" in dsn or re.match(r"^\s*\w[\w ]*=", dsn):
         params = _parse_keyvalue(dsn)
-        # Oracle's Data Source is host:port/service in one field.
+        trusted = params.pop("trusted", "").lower() in ("true", "yes", "sspi")
+        if trusted and not params.get("user"):
+            raise DbqError("integrated/trusted auth is not supported, only SQL logins")
         target = params.pop("target", None)
-        if target:
+        if driver == "sqlserver":
+            # SQL Server writes host,port with a comma, often behind a tcp: prefix.
+            target = target or params.pop("host", None)
+            if target:
+                host, _, port = target.removeprefix("tcp:").partition(",")
+                params["host"] = host.strip()
+                params["port"] = port.strip() or params.get("port")
+        elif target:
+            # Oracle's Data Source is host:port/service in one field.
             m = re.match(r"^(?P<host>[^:/]+)(?::(?P<port>\d+))?(?:/(?P<svc>.+))?$", target)
             if m:
                 params["host"] = m.group("host")
@@ -175,7 +200,7 @@ def parse_dsn(dsn, driver):
 
     if not params.get("host"):
         raise DbqError("connection string has no host")
-    params["port"] = int(params["port"]) if params.get("port") else (1521 if driver == "oracle" else 3306)
+    params["port"] = int(params["port"]) if params.get("port") else DEFAULT_PORTS[driver]
     return params
 
 
@@ -196,6 +221,42 @@ def connect(driver, params, timeout):
         # whatever the account is allowed to do.
         conn.cursor().execute("SET TRANSACTION READ ONLY")
         return conn
+
+    if driver == "postgres":
+        import pg8000.dbapi
+
+        conn = pg8000.dbapi.connect(
+            user=params.get("user") or "",
+            password=params.get("password") or None,
+            host=params["host"],
+            port=params["port"],
+            database=params.get("database") or None,
+            timeout=timeout,
+        )
+        # The session default must be set outside any transaction: a SET inside
+        # one is undone by the rollback main() always issues.
+        conn.autocommit = True
+        conn.cursor().execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+        conn.autocommit = False
+        # pg8000 sends BEGIN before the first statement, so this lands inside
+        # the transaction the query runs in. Any write then raises SQLSTATE 25006.
+        conn.cursor().execute("SET TRANSACTION READ ONLY")
+        return conn
+
+    if driver == "sqlserver":
+        import pytds
+
+        # SQL Server has no read-only transaction mode. The query runs in a
+        # transaction main() always rolls back; check_select_only is the guard.
+        return pytds.connect(
+            dsn=params["host"],
+            port=params["port"],
+            database=params.get("database") or None,
+            user=params.get("user") or "",
+            password=params.get("password") or "",
+            login_timeout=timeout,
+            autocommit=False,
+        )
 
     import pymysql
 
@@ -278,7 +339,18 @@ def tables_sql(driver, schema):
     if driver == "oracle":
         owner = f"'{schema}'" if schema else "SYS_CONTEXT('USERENV','CURRENT_SCHEMA')"
         return f"SELECT table_name FROM all_tables WHERE owner = {owner} ORDER BY table_name"
-    return "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() ORDER BY table_name"
+    if driver == "mysql":
+        return "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() ORDER BY table_name"
+    return (
+        "SELECT table_name FROM information_schema.tables "
+        f"WHERE table_schema = {_std_schema(driver, schema)} ORDER BY table_name"
+    )
+
+
+def _std_schema(driver, schema):
+    if schema:
+        return f"'{schema}'"
+    return "current_schema()" if driver == "postgres" else "SCHEMA_NAME()"
 
 
 def describe_sql(driver, table, schema):
@@ -288,9 +360,16 @@ def describe_sql(driver, table, schema):
             "SELECT column_name, data_type, nullable FROM all_tab_columns "
             f"WHERE owner = {owner} AND table_name = '{table.upper()}' ORDER BY column_id"
         )
+    if driver == "mysql":
+        return (
+            "SELECT column_name, column_type, is_nullable FROM information_schema.columns "
+            f"WHERE table_schema = DATABASE() AND table_name = '{table}' ORDER BY ordinal_position"
+        )
+    # lower() on both sides: postgres folds unquoted names, SQL Server is usually case-insensitive.
     return (
-        "SELECT column_name, column_type, is_nullable FROM information_schema.columns "
-        f"WHERE table_schema = DATABASE() AND table_name = '{table}' ORDER BY ordinal_position"
+        "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
+        f"WHERE table_schema = {_std_schema(driver, schema)} "
+        f"AND lower(table_name) = lower('{table}') ORDER BY ordinal_position"
     )
 
 
@@ -298,11 +377,13 @@ def describe_sql(driver, table, schema):
 
 
 def build_parser():
-    p = argparse.ArgumentParser(prog="dbq", description="read-only SQL against Oracle or MySQL")
+    p = argparse.ArgumentParser(
+        prog="dbq", description="read-only SQL against Oracle, MySQL, Postgres or SQL Server"
+    )
     p.add_argument("--profile", help="profile name from config.toml")
     p.add_argument("--sql", help="SQL to run")
     p.add_argument("--file", help="file containing the SQL")
-    p.add_argument("--driver", choices=["oracle", "mysql"])
+    p.add_argument("--driver", choices=list(DRIVERS))
     p.add_argument("--dsn", help="connection string, overrides the profile")
     p.add_argument("--env-file", help=".env to read the connection string from")
     p.add_argument("--env-var", help="variable name inside that .env")

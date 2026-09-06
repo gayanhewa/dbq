@@ -1,5 +1,5 @@
 {
-  description = "Read-only SQL against Oracle or MySQL, with agent-friendly output";
+  description = "Read-only SQL against Oracle, MySQL, Postgres or SQL Server, with agent-friendly output";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
@@ -22,11 +22,13 @@
           pyproject = true;
           src = ./.;
           build-system = [ pkgs.python3Packages.flit-core ];
-          # Neither driver needs a native client library: oracledb runs in
-          # thin mode, pymysql is pure Python.
+          # No driver needs a native client library: oracledb runs in thin
+          # mode, pymysql, pg8000 and python-tds are pure Python.
           dependencies = with pkgs.python3Packages; [
             oracledb
             pymysql
+            pg8000
+            python-tds
             python-dotenv
           ];
           # Ship the agent skill so consumers can link it into their skills

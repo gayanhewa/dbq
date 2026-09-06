@@ -1,0 +1,91 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e . pytest
+      - run: pytest tests/test_unit.py
+
+  integration:
+    runs-on: ubuntu-latest
+    # Passwords below are throwaway values for containers that live for one job.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: dbqtest
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: dbqtest
+          MYSQL_DATABASE: app
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -pdbqtest --silent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+      sqlserver:
+        # No reliable health command in this image; the test fixture retries the login.
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: DbqTest!Passw0rd
+        ports:
+          - 1433:1433
+      oracle:
+        image: gvenzl/oracle-free:23-slim-faststart
+        env:
+          ORACLE_PASSWORD: dbqtest
+          APP_USER: app
+          APP_USER_PASSWORD: dbqtest
+        ports:
+          - 1521:1521
+        options: >-
+          --health-cmd healthcheck.sh
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      DBQ_TEST_POSTGRES: postgres://postgres:dbqtest@127.0.0.1:5432/app
+      DBQ_TEST_MYSQL: mysql://root:dbqtest@127.0.0.1:3306/app
+      DBQ_TEST_SQLSERVER: "Server=127.0.0.1,1433;Database=master;User Id=sa;Password=DbqTest!Passw0rd"
+      DBQ_TEST_ORACLE: app/dbqtest@127.0.0.1:1521/FREEPDB1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e . pytest pg8000 python-tds
+      - run: pytest tests/test_integration.py -v
+
+  nix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - run: nix build .#dbq
+      - run: ./result/bin/dbq --help
