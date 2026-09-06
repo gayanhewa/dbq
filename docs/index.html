@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dbq: read-only SQL for coding agents</title>
+<meta name="description" content="dbq runs read-only SQL against Oracle, MySQL, Postgres or SQL Server and prints token-cheap output. Built for coding agents, pleasant for humans.">
+<meta name="keywords" content="dbq, read-only SQL, coding agents, Claude Code, MCP alternative, Oracle, MySQL, Postgres, SQL Server, CLI, agent skill, toon output">
+<meta name="author" content="Gayan Hewa">
+<meta name="robots" content="index, follow">
+<link rel="canonical" href="https://gayanhewa.github.io/dbq/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="dbq">
+<meta property="og:title" content="dbq: read-only SQL for coding agents">
+<meta property="og:description" content="One command, one SELECT, against Oracle, MySQL, Postgres or SQL Server. The database refuses to write. Output costs as few tokens as it can.">
+<meta property="og:url" content="https://gayanhewa.github.io/dbq/">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="dbq: read-only SQL for coding agents">
+<meta name="twitter:description" content="Read-only SQL against Oracle, MySQL, Postgres or SQL Server, with agent-friendly output.">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareSourceCode",
+  "name": "dbq",
+  "description": "Read-only SQL against Oracle, MySQL, Postgres or SQL Server, with agent-friendly output. Built for coding agents to query real data safely.",
+  "url": "https://gayanhewa.github.io/dbq/",
+  "codeRepository": "https://github.com/gayanhewa/dbq",
+  "programmingLanguage": "Python",
+  "runtimePlatform": "Python 3.11+",
+  "license": "https://opensource.org/licenses/MIT",
+  "author": { "@type": "Person", "name": "Gayan Hewa" },
+  "keywords": ["sql", "read-only", "coding agents", "oracle", "mysql", "postgres", "sql server", "cli"]
+}
+</script>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230f1720'/%3E%3Ctext x='16' y='22' font-family='monospace' font-size='16' fill='%237fd1b9' text-anchor='middle'%3Edb%3C/text%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #0f1720;
+    --bg-2: #141e2a;
+    --bg-3: #1b2734;
+    --fg: #dbe4ee;
+    --fg-2: #9fb0c2;
+    --fg-3: #6b7d90;
+    --accent: #7fd1b9;
+    --accent-2: #f2c66d;
+    --danger: #f28b82;
+    --border: #253444;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { color-scheme: dark; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--sans);
+    font-size: 17px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre, kbd { font-family: var(--mono); }
+  code { font-size: 0.9em; background: var(--bg-3); padding: 0.1em 0.35em; border-radius: 4px; }
+  pre {
+    margin: 1.2rem 0;
+    padding: 1rem 1.2rem;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow-x: auto;
+    font-size: 0.86rem;
+    line-height: 1.55;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .c { color: var(--fg-3); }
+  .k { color: var(--accent-2); }
+  .s { color: var(--accent); }
+  .e { color: var(--danger); }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 0 1.25rem; }
+
+  header.top {
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    position: sticky; top: 0; z-index: 2;
+  }
+  header.top .wrap { display: flex; align-items: center; justify-content: space-between; height: 56px; }
+  .brand { font-family: var(--mono); font-weight: 700; color: var(--fg); letter-spacing: 0.02em; }
+  .brand span { color: var(--accent); }
+  nav a { color: var(--fg-2); margin-left: 1.25rem; font-size: 0.95rem; }
+  nav a:hover { color: var(--fg); }
+
+  .hero { padding: 4.5rem 0 3rem; }
+  .hero h1 { font-size: 2.6rem; line-height: 1.15; margin: 0 0 1rem; font-weight: 700; letter-spacing: -0.01em; }
+  .hero h1 em { font-style: normal; color: var(--accent); }
+  .hero p.lede { font-size: 1.2rem; color: var(--fg-2); max-width: 640px; margin: 0 0 1.8rem; }
+  .badges { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 1.6rem; }
+  .badges img { height: 20px; }
+  .pill {
+    display: inline-block; font-family: var(--mono); font-size: 0.78rem;
+    padding: 0.15rem 0.55rem; border: 1px solid var(--border); border-radius: 999px; color: var(--fg-2);
+  }
+  .install { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .install pre { margin: 0; }
+  .install h3 { margin: 0 0 0.4rem; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-3); font-weight: 600; }
+
+  section { padding: 2.6rem 0; border-top: 1px solid var(--border); }
+  section h2 { font-size: 1.55rem; margin: 0 0 1rem; letter-spacing: -0.01em; }
+  section h2 a { color: inherit; }
+  section h2 a:hover { text-decoration: none; }
+  section h2 a::before { content: "#"; color: var(--border); margin-right: 0.5rem; }
+  section p { color: var(--fg-2); }
+  section p strong { color: var(--fg); font-weight: 600; }
+
+  .callout {
+    border-left: 3px solid var(--accent-2);
+    background: var(--bg-2);
+    padding: 0.9rem 1.1rem;
+    border-radius: 0 8px 8px 0;
+    margin: 1.2rem 0;
+  }
+  .callout p { margin: 0; color: var(--fg); }
+
+  table { width: 100%; border-collapse: collapse; margin: 1.2rem 0; font-size: 0.95rem; }
+  th, td { text-align: left; padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--fg-3); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; }
+  td code { white-space: nowrap; }
+  .table-wrap { overflow-x: auto; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; margin-top: 1.2rem; }
+  .card { background: var(--bg-2); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.1rem; }
+  .card h3 { margin: 0 0 0.4rem; font-size: 1rem; }
+  .card p { margin: 0; font-size: 0.93rem; }
+  .card .pill { margin-top: 0.7rem; }
+
+  footer { border-top: 1px solid var(--border); padding: 2rem 0 3rem; color: var(--fg-3); font-size: 0.9rem; }
+  footer a { color: var(--fg-2); }
+
+  @media (max-width: 640px) {
+    body { font-size: 16px; }
+    .hero { padding: 3rem 0 2rem; }
+    .hero h1 { font-size: 2rem; }
+    .install { grid-template-columns: 1fr; }
+    nav a:not(:last-child) { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#">db<span>q</span></a>
+    <nav>
+      <a href="#readonly">Read-only</a>
+      <a href="#config">Config</a>
+      <a href="#examples">Examples</a>
+      <a href="#agents">Agents</a>
+      <a href="https://github.com/gayanhewa/dbq">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="wrap hero">
+    <h1>Read-only SQL for <em>coding agents</em>.</h1>
+    <p class="lede">
+      One command, one SELECT, against Oracle, MySQL, Postgres or SQL Server.
+      The database itself refuses to write. The output costs as few tokens as it can.
+    </p>
+    <div class="badges">
+      <a href="https://github.com/gayanhewa/dbq/actions/workflows/ci.yml"><img alt="ci status" src="https://github.com/gayanhewa/dbq/actions/workflows/ci.yml/badge.svg"></a>
+      <span class="pill">one python file</span>
+      <span class="pill">no native client libraries</span>
+      <span class="pill">MIT</span>
+    </div>
+    <div class="install">
+      <div>
+        <h3>nix</h3>
+<pre><code>nix profile install github:gayanhewa/dbq</code></pre>
+      </div>
+      <div>
+        <h3>uv / pipx</h3>
+<pre><code>uv tool install git+https://github.com/gayanhewa/dbq</code></pre>
+      </div>
+    </div>
+  </div>
+
+  <section id="why">
+    <div class="wrap">
+      <h2><a href="#why">Why</a></h2>
+      <p>
+        An agent that can read production-shaped data writes better code than one that guesses
+        from the schema. The trouble is handing it a database connection. <code>dbq</code> gives it a
+        narrow door: one SELECT at a time, credentials it never sees, and a server-side guarantee
+        that nothing changes.
+      </p>
+      <p>
+        Every driver is pure Python. <code>oracledb</code> runs in thin mode and speaks the wire
+        protocol directly; <code>pymysql</code>, <code>pg8000</code> and <code>python-tds</code> need
+        nothing installed beyond themselves. It runs wherever Python 3.11 runs.
+      </p>
+    </div>
+  </section>
+
+  <section id="readonly">
+    <div class="wrap">
+      <h2><a href="#readonly">Read-only is enforced by the database</a></h2>
+      <p>
+        On Oracle, MySQL and Postgres every query runs inside a read-only transaction:
+        <code>SET TRANSACTION READ ONLY</code> on Oracle and Postgres, <code>START TRANSACTION READ ONLY</code>
+        on MySQL. A write fails server-side <strong>even when the account has permission</strong>.
+      </p>
+<pre><code><span class="c">$ mysql ... -e "START TRANSACTION READ ONLY; DELETE FROM widget WHERE id=1;"</span>
+<span class="e">ERROR 1792 (25006): Cannot execute statement in a READ ONLY transaction.</span>
+
+<span class="c">$ psql ... -c "BEGIN; SET TRANSACTION READ ONLY; DELETE FROM widget WHERE id=1;"</span>
+<span class="e">ERROR:  cannot execute DELETE in a read-only transaction</span></code></pre>
+      <p>
+        That is the guarantee on those three. <code>dbq</code> also checks that the statement starts
+        with <code>SELECT</code> or <code>WITH</code>, but only so the error message is clearer than the
+        driver's. The string check is not what makes this safe. SQL has too many ways to hide a write.
+      </p>
+      <div class="callout">
+        <p>
+          <strong>SQL Server is weaker.</strong> It has no read-only transaction mode. There, <code>dbq</code>
+          opens an explicit transaction and always rolls it back, so the SELECT-only check becomes the
+          first line of defence and the rollback the second. Consumed identity values and anything a
+          stored procedure commits on its own survive a rollback. Point it at a read-only login where you can.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section id="config">
+    <div class="wrap">
+      <h2><a href="#config">Config</a></h2>
+      <p>
+        Profiles live in <code>~/.config/dbq/config.toml</code>. A profile either carries the connection
+        string inline or names a <code>.env</code> you already have, so the credential is never copied
+        somewhere new to go stale. The agent passes a profile name and never sees the value.
+      </p>
+<pre><code><span class="k">default</span> = <span class="s">"work"</span>
+
+[<span class="k">profiles.work</span>]
+driver   = <span class="s">"oracle"</span>
+env_file = <span class="s">"~/code/app/.env"</span>          <span class="c"># read the DSN from an existing .env</span>
+env_var  = <span class="s">"ORACLE_CONNECTION"</span>
+schema   = <span class="s">"APP_SCHEMA"</span>               <span class="c"># optional, substituted for {{schema}}</span>
+
+[<span class="k">profiles.analytics</span>]
+driver = <span class="s">"postgres"</span>
+dsn    = <span class="s">"postgres://reader:pw@127.0.0.1:5432/analytics"</span>
+
+[<span class="k">profiles.legacy</span>]
+driver   = <span class="s">"sqlserver"</span>
+env_file = <span class="s">"~/code/legacy/.env"</span>
+env_var  = <span class="s">"SQL_CONNECTION"</span>           <span class="c"># Server=host,1433;Database=app;User Id=ro;Password=pw</span></code></pre>
+      <p>Then:</p>
+<pre><code>dbq --list-profiles
+dbq --tables
+dbq --describe ORDERS
+dbq --profile work --sql "SELECT * FROM {{schema}}.TENANT_SETTING"
+dbq --profile analytics --file query.sql --json
+
+<span class="c"># no config needed</span>
+dbq --driver mysql --dsn 'mysql://root:pw@127.0.0.1:3306/app' --sql 'SELECT 1'</code></pre>
+      <p>
+        Connection strings parse in whatever shape the app already uses: URLs
+        (<code>mysql://</code>, <code>postgres://</code>, <code>mssql://</code>), .NET key=value strings
+        with <code>Server=host,1433</code> or <code>Data Source=host:1521/svc</code>, and Oracle
+        EZ-connect (<code>scott/tiger@host:1521/ORCL</code>).
+      </p>
+    </div>
+  </section>
+
+  <section id="output">
+    <div class="wrap">
+      <h2><a href="#output">Output built for a reader that pays per token</a></h2>
+      <p>
+        The default format is <strong>toon</strong>: a header naming the columns once, then bare rows.
+        It costs far less than a table or JSON when an agent reads it. <code>--json</code> switches when
+        a program is on the other end.
+      </p>
+<pre><code><span class="k">profile</span>: work
+<span class="k">driver</span>: oracle
+<span class="k">host</span>: db.example.com
+<span class="k">schema</span>: APP_SCHEMA
+<span class="k">count</span>: 3
+<span class="k">rows[3]{ID,NAME,NOTE}</span>:
+  1,alpha,null
+  2,beta,"has,comma"
+  3,gamma,x</code></pre>
+      <p>
+        Cells are quoted only when they contain a comma, quote or newline. <code>null</code> is distinct
+        from the empty string. An empty result prints <code>(no rows)</code>, so "no matches" never looks
+        like "the query failed". <code>--max-rows</code> defaults to 100 and says so in the header when it
+        truncates.
+      </p>
+    </div>
+  </section>
+
+  <section id="examples">
+    <div class="wrap">
+      <h2><a href="#examples">Examples</a></h2>
+      <p>
+        The workflow the skill teaches: look before you query. <code>--tables</code> and
+        <code>--describe</code> replace guessing at column names, which is the most common cause of a
+        wrong query.
+      </p>
+<pre><code><span class="c">$ dbq --profile work --describe TENANT_SETTING</span>
+profile: work
+driver: oracle
+host: db.example.com
+schema: APP_SCHEMA
+count: 4
+rows[4]{COLUMN_NAME,DATA_TYPE,NULLABLE}:
+  ID,NUMBER,N
+  TENANT_ID,NUMBER,N
+  KEY,VARCHAR2,N
+  VALUE,VARCHAR2,Y
+
+<span class="c">$ dbq --profile work --sql "SELECT key, value FROM {{schema}}.TENANT_SETTING WHERE tenant_id = 42"</span>
+profile: work
+driver: oracle
+host: db.example.com
+schema: APP_SCHEMA
+count: 2
+rows[2]{KEY,VALUE}:
+  currency,AUD
+  timezone,Australia/Sydney</code></pre>
+
+      <p>An empty result is an answer, not an error. The exit code is 0 and the header says so.</p>
+<pre><code><span class="c">$ dbq --profile analytics --sql "SELECT id FROM orders WHERE status = 'refunded' AND created_at > now() - interval '1 day'"</span>
+profile: analytics
+driver: postgres
+host: 127.0.0.1
+count: 0
+rows[0]{id}:
+  (no rows)</code></pre>
+
+      <p>Multi-line SQL goes in a file. Shell quoting is how queries get mangled.</p>
+<pre><code><span class="c">$ cat slow-tenants.sql</span>
+WITH per_tenant AS (
+  SELECT tenant_id, count(*) AS n, avg(duration_ms) AS avg_ms
+  FROM request_log
+  WHERE created_at > now() - interval '1 hour'
+  GROUP BY tenant_id
+)
+SELECT tenant_id, n, round(avg_ms) AS avg_ms
+FROM per_tenant
+WHERE avg_ms > 500
+ORDER BY avg_ms DESC
+
+<span class="c">$ dbq --profile analytics --file slow-tenants.sql --max-rows 3</span>
+profile: analytics
+driver: postgres
+host: 127.0.0.1
+count: 3
+truncated: true, showing first 3
+rows[3]{tenant_id,n,avg_ms}:
+  42,1180,2210
+  7,312,911
+  91,88,640</code></pre>
+
+      <p><code>--json</code> when a program is on the other end. The same fields, as an object.</p>
+<pre><code><span class="c">$ dbq --profile legacy --json --sql "SELECT TOP 2 id, name FROM dbo.customer ORDER BY id"</span>
+{
+  <span class="k">"profile"</span>: <span class="s">"legacy"</span>,
+  <span class="k">"driver"</span>: <span class="s">"sqlserver"</span>,
+  <span class="k">"host"</span>: <span class="s">"legacy-db.internal"</span>,
+  <span class="k">"count"</span>: 2,
+  <span class="k">"columns"</span>: [<span class="s">"id"</span>, <span class="s">"name"</span>],
+  <span class="k">"rows"</span>: [
+    { <span class="k">"id"</span>: 1, <span class="k">"name"</span>: <span class="s">"Acme"</span> },
+    { <span class="k">"id"</span>: 2, <span class="k">"name"</span>: <span class="s">"Globex"</span> }
+  ]
+}
+
+<span class="c">$ dbq --profile legacy --json --sql "..." | jq -r '.rows[].name'</span></code></pre>
+
+      <p>Writes stop at the door, with a message an agent can act on.</p>
+<pre><code><span class="c">$ dbq --profile local --sql "DELETE FROM widget WHERE id = 1"</span>
+<span class="e">error: only SELECT and WITH are allowed, got DELETE</span>
+<span class="c">$ echo $?</span>
+2</code></pre>
+
+      <p>
+        Row limiting differs by engine, and the <code>driver</code> line in every header tells the
+        reader which one it is talking to: <code>FETCH FIRST 10 ROWS ONLY</code> on Oracle,
+        <code>LIMIT 10</code> on MySQL and Postgres, <code>TOP 10</code> on SQL Server.
+      </p>
+    </div>
+  </section>
+
+  <section id="drivers">
+    <div class="wrap">
+      <h2><a href="#drivers">Drivers</a></h2>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>Database</th><th>Library</th><th>Read-only guard</th><th>Default port</th></tr></thead>
+        <tbody>
+          <tr><td>Oracle</td><td><code>oracledb</code> (thin)</td><td><code>SET TRANSACTION READ ONLY</code></td><td>1521</td></tr>
+          <tr><td>MySQL</td><td><code>pymysql</code></td><td><code>START TRANSACTION READ ONLY</code></td><td>3306</td></tr>
+          <tr><td>Postgres</td><td><code>pg8000</code></td><td><code>SET TRANSACTION READ ONLY</code></td><td>5432</td></tr>
+          <tr><td>SQL Server</td><td><code>python-tds</code></td><td>SELECT check, then rollback</td><td>1433</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p>
+        Every push runs the integration suite against real containers of all four, so the guard is
+        tested against a live server, not mocked.
+      </p>
+    </div>
+  </section>
+
+  <section id="agents">
+    <div class="wrap">
+      <h2><a href="#agents">Give it to your agent</a></h2>
+      <p>
+        The repo ships a skill, a folder with a <code>SKILL.md</code> that teaches the discipline the tool
+        assumes: use profiles instead of pasting credentials, run <code>--describe</code> before writing
+        SQL against an unseen table, and treat <code>count: 0</code> as an answer rather than a failure.
+        Install the binary first, then the skill.
+      </p>
+      <div class="grid">
+        <div class="card">
+          <h3>Any agent</h3>
+          <p>Claude Code, Codex, Copilot, Cursor, opencode, pi. Anything that reads SKILL.md folders.</p>
+          <pre style="margin:0.7rem 0 0"><code>npx skills add gayanhewa/dbq</code></pre>
+        </div>
+        <div class="card">
+          <h3>Claude Code plugin</h3>
+          <p>The repo is its own marketplace.</p>
+          <pre style="margin:0.7rem 0 0"><code>/plugin marketplace add gayanhewa/dbq
+/plugin install dbq@dbq</code></pre>
+        </div>
+        <div class="card">
+          <h3>By hand</h3>
+          <p>Symlink the folder into wherever your agent looks. Nix users can link it out of the store.</p>
+          <pre style="margin:0.7rem 0 0"><code>ln -s "$(pwd)/skills/dbq" ~/.claude/skills/dbq</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    MIT licensed. Source, issues and the skill live on
+    <a href="https://github.com/gayanhewa/dbq">github.com/gayanhewa/dbq</a>.
+  </div>
+</footer>
+
+</body>
+</html>

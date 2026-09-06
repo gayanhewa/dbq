@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://gayanhewa.github.io/dbq/sitemap.xml
