@@ -1,0 +1,9 @@
+{
+  "name": "dbq",
+  "version": "0.1.0",
+  "description": "Read-only SQL against Oracle, MySQL, Postgres or SQL Server, with agent-friendly output",
+  "author": { "name": "Gayan Hewa" },
+  "repository": "https://github.com/gayanhewa/dbq",
+  "license": "MIT",
+  "keywords": ["sql", "database", "oracle", "mysql", "postgres", "sqlserver", "read-only"]
+}

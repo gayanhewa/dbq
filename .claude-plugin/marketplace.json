@@ -1,0 +1,14 @@
+{
+  "name": "dbq",
+  "owner": {
+    "name": "Gayan Hewa"
+  },
+  "plugins": [
+    {
+      "name": "dbq",
+      "source": "./",
+      "description": "Read-only SQL against Oracle, MySQL, Postgres or SQL Server, with agent-friendly output"
+    }
+  ],
+  "description": "Read-only SQL for coding agents"
+}
