@@ -1,5 +1,5 @@
 {
-  description = "Read-only SQL against Oracle, MySQL, Postgres or SQL Server, with agent-friendly output";
+  description = "Read-only SQL against Oracle, MySQL, Postgres, SQL Server, SQLite or libsql, with agent-friendly output";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
@@ -25,12 +25,12 @@
           # No driver needs a native client library: oracledb runs in thin
           # mode, pymysql, pg8000 and python-tds are pure Python.
           # sqlite uses stdlib — no extra dependency needed.
+          # libsql-client is not yet in nixpkgs; install via pip for libsql/Turso.
           dependencies = with pkgs.python3Packages; [
             oracledb
             pymysql
             pg8000
             python-tds
-            libsql-client
             python-dotenv
           ];
           # Ship the agent skill so consumers can link it into their skills

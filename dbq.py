@@ -304,13 +304,12 @@ def connect(driver, params, timeout):
     if driver == "sqlite":
         import sqlite3
 
-        # URI mode with mode=ro: fails if the file does not exist, prevents
-        # any write even without the PRAGMA. The PRAGMA is an extra belt.
-        conn = sqlite3.connect(
+        # URI mode with mode=ro: fails if the file does not exist, and the
+        # server rejects any write attempt with "attempt to write a readonly
+        # database". No PRAGMA needed — the file itself is read-only.
+        return sqlite3.connect(
             f"file:{params['database']}?mode=ro", uri=True
         )
-        conn.execute("PRAGMA query_only = ON")
-        return conn
 
     if driver == "libsql":
         import libsql_client

@@ -76,7 +76,8 @@ def connect_autocommit(driver, dsn, timeout=10):
     if driver == "sqlite":
         import sqlite3
 
-        conn = sqlite3.connect(p["database"])
+        # isolation_level=None enables autocommit so INSERTs land immediately
+        conn = sqlite3.connect(p["database"], isolation_level=None)
         conn.execute("PRAGMA journal_mode=WAL")
         return conn
     if driver == "libsql":

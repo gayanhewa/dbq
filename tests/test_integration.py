@@ -198,12 +198,12 @@ def test_sqlite_describe(sqlite_db, capsys):
 
 
 def test_sqlite_connection_is_read_only(sqlite_db):
-    """SQLite's PRAGMA query_only = ON prevents writes."""
+    """SQLite's mode=ro URI prevents writes."""
     driver, dsn, raw = sqlite_db
     params = dbq.parse_dsn(dsn, driver)
     conn = dbq.connect(driver, params, 30)
     try:
-        with pytest.raises(Exception):
+        with pytest.raises(Exception, match="readonly database"):
             conn.execute("DELETE FROM dbq_widget WHERE id = 1")
     finally:
         conn.close()

@@ -28,9 +28,9 @@ pipx install git+https://github.com/gayanhewa/dbq
 ## Read-only is enforced by the database
 
 On Oracle, MySQL, Postgres and SQLite every query runs inside a read-only
-transaction: `SET TRANSACTION READ ONLY` on Oracle and Postgres, `START
-TRANSACTION READ ONLY` on MySQL, `PRAGMA query_only = ON` on SQLite. A write
-fails server-side even when the account has permission:
+transaction or connection: `SET TRANSACTION READ ONLY` on Oracle and
+Postgres, `START TRANSACTION READ ONLY` on MySQL, `URI mode=ro` on SQLite.
+A write fails server-side even when the account has permission:
 
 ```
 $ mysql -uroot ... -e "START TRANSACTION READ ONLY; DELETE FROM widget WHERE id=1;"
@@ -40,11 +40,12 @@ $ psql ... -c "BEGIN; SET TRANSACTION READ ONLY; DELETE FROM widget WHERE id=1;"
 ERROR:  cannot execute DELETE in a read-only transaction   (SQLSTATE 25006)
 ```
 
-That is the guarantee on those four. SQLite's `PRAGMA query_only = ON` makes
-any write raise an error at the SQLite level. The SELECT-only check in `dbq`
-runs first, but only so the error is clearer than the driver's. It is not what
-makes this safe. Do not weaken the transaction mode on the assumption the
-string check will hold; SQL has too many ways to hide a write.
+That is the guarantee on those four. SQLite opens the database file itself in
+read-only mode (`URI mode=ro`), so the operating system rejects writes at the
+file level. The SELECT-only check in `dbq` runs first, but only so the error
+is clearer than the driver's. It is not what makes this safe. Do not weaken the
+transaction mode on the assumption the string check will hold; SQL has too many
+ways to hide a write.
 
 For libsql (Turso), read-only enforcement depends on the server token
 permissions. The `libsql-client` library sends all queries through the provided
