@@ -382,6 +382,7 @@ def test_main_sqlite_direct_dsn(no_config, capsys, tmp_path):
 
 def test_main_libsql_direct_dsn(no_config, capsys, tmp_path):
     """libsql driver works with a direct --dsn pointing at a local file."""
+    pytest.importorskip("libsql_client")
     db_path = tmp_path / "test_libsql.db"
     code, out, err = _run(
         capsys,
