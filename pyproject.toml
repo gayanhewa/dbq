@@ -14,9 +14,11 @@ dependencies = [
   "pymysql>=1.1",
   "pg8000>=1.31",
   "python-tds>=1.16",
-  "libsql-client>=0.3",
   "python-dotenv>=1",
 ]
+
+[project.optional-dependencies]
+libsql = ["libsql-client>=0.3"]
 
 [project.urls]
 Repository = "https://github.com/gayanhewa/dbq"

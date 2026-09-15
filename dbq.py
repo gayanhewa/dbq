@@ -312,7 +312,13 @@ def connect(driver, params, timeout):
         )
 
     if driver == "libsql":
-        import libsql_client
+        try:
+            import libsql_client
+        except ImportError:
+            raise DbqError(
+                "libsql driver requires libsql-client. "
+                "Install it with: pip install 'dbq[libsql]'"
+            )
 
         return libsql_client.create_client_sync(
             url=params["url"],

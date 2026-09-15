@@ -8,7 +8,8 @@ Read-only SQL against Oracle, MySQL, Postgres, SQL Server, SQLite or libsql
 One Python file. No driver needs a native client library: `oracledb` runs in
 thin mode and speaks the Oracle wire protocol directly, and `pymysql`, `pg8000`,
 `python-tds` and `libsql-client` are pure Python. SQLite uses the stdlib
-`sqlite3` module, so no extra dependency is needed.
+`sqlite3` module, so no extra dependency is needed. The libsql driver requires
+`libsql-client` (install with `pip install 'dbq[libsql]'`).
 Built for coding agents to query real data safely, and pleasant enough for
 humans.
 
