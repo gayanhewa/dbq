@@ -9,7 +9,9 @@ import pytest
 import dbq
 import dbhelpers
 
-DRIVERS = list(dbhelpers.ENV_VARS)
+# Server-based drivers only: sqlite and libsql have their own fixtures below.
+_SERVER_DRIVERS = ["oracle", "mysql", "postgres", "sqlserver"]
+DRIVERS = _SERVER_DRIVERS
 
 
 @pytest.fixture(scope="module", params=DRIVERS)
@@ -139,7 +141,119 @@ def test_connection_is_read_only(db):
                 cur.execute("DELETE FROM dbq_widget WHERE id = 1")
             assert dbhelpers.READONLY_ERROR_TOKEN[driver] in str(exc.value)
     finally:
-        conn.rollback()
+        if hasattr(conn, "rollback"):
+            conn.rollback()
         conn.close()
 
     assert dbhelpers.fetchall(raw, "SELECT id FROM dbq_widget WHERE id = 1") == [(1,)]
+
+
+# --- sqlite (stdlib, no container needed) -----------------------------------
+
+
+@pytest.fixture(scope="module")
+def sqlite_db(tmp_path_factory):
+    path = tmp_path_factory.mktemp("dbq") / "test.db"
+    dsn = str(path)
+    conn = dbhelpers.connect_autocommit("sqlite", dsn)
+    dbhelpers.create_widget("sqlite", conn)
+    yield "sqlite", dsn, conn
+    try:
+        dbhelpers.drop_widget(conn)
+    finally:
+        conn.close()
+        path.unlink(missing_ok=True)
+
+
+def test_sqlite_select_toon(sqlite_db, capsys):
+    driver, dsn, _ = sqlite_db
+    code, out, err = run_dbq(capsys, driver, dsn, "--sql", SELECT_ALL)
+    assert (code, err) == (0, "")
+    assert out.splitlines()[3] == "count: 3"
+    assert "1,alpha,null" in out
+
+
+def test_sqlite_select_json(sqlite_db, capsys):
+    driver, dsn, _ = sqlite_db
+    code, out, err = run_dbq(capsys, driver, dsn, "--json", "--sql", SELECT_ALL)
+    assert (code, err) == (0, "")
+    doc = json.loads(out)
+    assert doc["count"] == 3
+    assert len(doc["rows"]) == 3
+
+
+def test_sqlite_tables(sqlite_db, capsys):
+    driver, dsn, _ = sqlite_db
+    code, out, err = run_dbq(capsys, driver, dsn, "--tables")
+    assert (code, err) == (0, "")
+    assert "dbq_widget" in out
+
+
+def test_sqlite_describe(sqlite_db, capsys):
+    driver, dsn, _ = sqlite_db
+    code, out, err = run_dbq(capsys, driver, dsn, "--describe", "dbq_widget")
+    assert (code, err) == (0, "")
+    lines = out.splitlines()
+    assert "count: 3" in lines
+
+
+def test_sqlite_connection_is_read_only(sqlite_db):
+    """SQLite's PRAGMA query_only = ON prevents writes."""
+    driver, dsn, raw = sqlite_db
+    params = dbq.parse_dsn(dsn, driver)
+    conn = dbq.connect(driver, params, 30)
+    try:
+        with pytest.raises(Exception):
+            conn.execute("DELETE FROM dbq_widget WHERE id = 1")
+    finally:
+        conn.close()
+    assert dbhelpers.fetchall(raw, "SELECT id FROM dbq_widget WHERE id = 1") == [(1,)]
+
+
+# --- libsql (local file, no Turso server required) --------------------------
+
+
+@pytest.fixture(scope="module")
+def libsql_db(tmp_path_factory):
+    path = tmp_path_factory.mktemp("dbq") / "test_libsql.db"
+    dsn = f"file://{path}"
+    conn = dbhelpers.connect_autocommit("libsql", dsn)
+    dbhelpers.create_widget("libsql", conn)
+    yield "libsql", dsn, conn
+    try:
+        dbhelpers.drop_widget(conn)
+    finally:
+        conn.close()
+        path.unlink(missing_ok=True)
+
+
+def test_libsql_select_toon(libsql_db, capsys):
+    driver, dsn, _ = libsql_db
+    code, out, err = run_dbq(capsys, driver, dsn, "--sql", SELECT_ALL)
+    assert (code, err) == (0, "")
+    assert out.splitlines()[3] == "count: 3"
+    assert "1,alpha,null" in out
+
+
+def test_libsql_select_json(libsql_db, capsys):
+    driver, dsn, _ = libsql_db
+    code, out, err = run_dbq(capsys, driver, dsn, "--json", "--sql", SELECT_ALL)
+    assert (code, err) == (0, "")
+    doc = json.loads(out)
+    assert doc["count"] == 3
+    assert len(doc["rows"]) == 3
+
+
+def test_libsql_tables(libsql_db, capsys):
+    driver, dsn, _ = libsql_db
+    code, out, err = run_dbq(capsys, driver, dsn, "--tables")
+    assert (code, err) == (0, "")
+    assert "dbq_widget" in out
+
+
+def test_libsql_describe(libsql_db, capsys):
+    driver, dsn, _ = libsql_db
+    code, out, err = run_dbq(capsys, driver, dsn, "--describe", "dbq_widget")
+    assert (code, err) == (0, "")
+    lines = out.splitlines()
+    assert "count: 3" in lines
