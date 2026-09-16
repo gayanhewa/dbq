@@ -135,12 +135,47 @@ from dbq import DbqError, check_select_only, parse_dsn, to_json, to_toon
             "oracle",
             dict(user="scott", password="tiger", host="host", port=1522, database="ORCLPDB1"),
         ),
+        # SQLite: plain file path
+        (
+            "/data/app.db",
+            "sqlite",
+            dict(database="/data/app.db", host="/data/app.db"),
+        ),
+        (
+            "sqlite:///data/app.db",
+            "sqlite",
+            dict(database="data/app.db", host="data/app.db"),
+        ),
+        (
+            "./local.db",
+            "sqlite",
+            dict(database="local.db", host="local.db"),
+        ),
+        # libsql: remote Turso URL with auth token in query param
+        (
+            "libsql://my-db.turso.io?authToken=sekret",
+            "libsql",
+            dict(url="libsql://my-db.turso.io", host="libsql://my-db.turso.io", auth_token="sekret"),
+        ),
+        # libsql: remote Turso URL without auth token
+        (
+            "libsql://my-db.turso.io",
+            "libsql",
+            dict(url="libsql://my-db.turso.io", host="libsql://my-db.turso.io"),
+        ),
+        # libsql: local file
+        (
+            "file:///data/db.sqlite",
+            "libsql",
+            dict(url="file:///data/db.sqlite", host="file:///data/db.sqlite"),
+        ),
     ],
 )
 def test_parse_dsn(dsn, driver, expected):
     got = parse_dsn(dsn, driver)
     assert {k: got[k] for k in expected} == expected
-    assert isinstance(got["port"], int)
+    if "port" in expected:
+        assert isinstance(got["port"], int)
 
 
 def test_parse_dsn_strips_surrounding_whitespace():
@@ -330,20 +365,39 @@ def test_main_no_driver(no_config, capsys):
     assert err.startswith("error: no driver set")
 
 
-def test_main_unsupported_driver_in_profile(config, capsys):
-    code, _, err = _run(capsys, ["--profile", "weird", "--sql", "SELECT 1"])
-    assert code == 2
-    assert err.startswith("error: unsupported driver 'sqlite'")
+def test_main_sqlite_direct_dsn(no_config, capsys, tmp_path):
+    """sqlite driver works with a direct --dsn pointing at a real file."""
+    import sqlite3
+
+    db_path = tmp_path / "test.db"
+    sqlite3.connect(str(db_path)).close()
+    code, out, err = _run(
+        capsys,
+        ["--driver", "sqlite", "--dsn", str(db_path), "--sql", "SELECT 1 AS greeting"],
+    )
+    assert code == 0, f"stderr: {err}"
+    assert "greeting" in out
+    assert "1" in out
 
 
-def test_main_unsupported_driver_on_cli_is_rejected_by_argparse(no_config, capsys):
-    with pytest.raises(SystemExit) as exc:
-        dbq.main(["--driver", "sqlite", "--dsn", "x", "--sql", "SELECT 1"])
-    assert exc.value.code == 2
-    assert "invalid choice: 'sqlite'" in capsys.readouterr().err
+def test_main_libsql_direct_dsn(no_config, capsys, tmp_path):
+    """libsql driver works with a direct --dsn pointing at a local file."""
+    pytest.importorskip("libsql_client")
+    db_path = tmp_path / "test_libsql.db"
+    code, out, err = _run(
+        capsys,
+        [
+            "--driver", "libsql",
+            "--dsn", f"file://{db_path}",
+            "--sql", "SELECT 1 AS greeting",
+        ],
+    )
+    assert code == 0, f"stderr: {err}"
+    assert "greeting" in out
+    assert "1" in out
 
 
-@pytest.mark.parametrize("driver", ["oracle", "mysql", "postgres", "sqlserver"])
+@pytest.mark.parametrize("driver", ["oracle", "mysql", "postgres", "sqlserver", "sqlite", "libsql"])
 def test_main_accepts_every_driver_name(no_config, capsys, driver):
     # Fails on the schema check, which runs before any connection attempt, so
     # this only proves argparse and resolve_profile accept the driver name.
@@ -353,6 +407,9 @@ def test_main_accepts_every_driver_name(no_config, capsys, driver):
     )
     assert code == 2
     assert err == "error: query uses {{schema}} but the profile sets no schema\n"
+
+
+
 
 
 def test_main_schema_placeholder_without_schema(config, capsys):

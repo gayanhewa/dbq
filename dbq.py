@@ -1,11 +1,12 @@
-"""dbq — run read-only SQL against Oracle, MySQL, Postgres or SQL Server and
-print toon or json.
+"""dbq — run read-only SQL against Oracle, MySQL, Postgres, SQL Server,
+SQLite, or libsql (including Turso) and print toon or json.
 
-Read-only is enforced by the database where it can be: on Oracle, MySQL and
-Postgres every query runs inside a read-only transaction, so a write fails
-server-side even if the account has permission. SQL Server has no read-only
-transaction mode, so there the query runs in a transaction that is always
-rolled back and the statement check is the only guard. The statement check
+Read-only is enforced by the database where it can be: on Oracle, MySQL,
+Postgres and SQLite every query runs inside a read-only transaction, so a write
+fails server-side even if the account has permission. SQL Server has no
+read-only transaction mode, so there the query runs in a transaction that is
+always rolled back and the statement check is the only guard. For libsql
+(Turso), read-only depends on the server token permissions. The statement check
 otherwise exists to fail fast with a clearer message than the driver would give.
 
 Credentials are never written anywhere. A profile either carries a dsn inline
@@ -34,6 +35,16 @@ Config: ~/.config/dbq/config.toml (override with DBQ_CONFIG)
     driver = "sqlserver"
     dsn    = "Server=db.example.com,1433;Database=app;User Id=user;Password=pw"
     # or mssql://user:pw@db.example.com/app, or sqlserver://...
+
+    [profiles.localdb]
+    driver = "sqlite"
+    dsn    = "~/data/app.db"
+
+    [profiles.turso]
+    driver   = "libsql"
+    dsn      = "libsql://my-db.turso.io"
+    env_file = "~/.turso/env"
+    env_var  = "TURSO_AUTH_TOKEN"      # reads the auth token, not the DSN
 """
 
 import argparse
@@ -49,7 +60,7 @@ CONFIG_PATH = Path(os.environ.get("DBQ_CONFIG", "~/.config/dbq/config.toml")).ex
 DEFAULT_MAX_ROWS = 100
 DEFAULT_TIMEOUT = 30
 DEFAULT_PORTS = {"oracle": 1521, "mysql": 3306, "postgres": 5432, "sqlserver": 1433}
-DRIVERS = tuple(DEFAULT_PORTS)
+DRIVERS = tuple(DEFAULT_PORTS) + ("sqlite", "libsql")
 
 
 class DbqError(Exception):
@@ -151,6 +162,38 @@ def _parse_keyvalue(dsn):
 def parse_dsn(dsn, driver):
     """Accept url, .NET key=value, or Oracle EZ-connect and return kwargs."""
     dsn = dsn.strip()
+
+    if driver == "sqlite":
+        # sqlite:///path/to/db, sqlite://host/path, or plain file path
+        if dsn.startswith("sqlite://"):
+            u = urlparse(dsn)
+            path = unquote(u.path)
+            if u.hostname and u.hostname not in ("", "localhost"):
+                # sqlite://host/path — treat host as part of the path
+                path = "/" + u.hostname + (path if path.startswith("/") else "/" + path)
+            return {"database": path.lstrip("/"), "host": path.lstrip("/")}
+        path = str(Path(dsn).expanduser())
+        return {"database": path, "host": path}
+
+    if driver == "libsql":
+        url = dsn
+        auth_token = None
+        # Extract authToken from query params
+        if "?" in url:
+            base, qs = url.split("?", 1)
+            parts = []
+            for part in qs.split("&"):
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    if k == "authToken":
+                        auth_token = unquote(v)
+                        continue
+                parts.append(part)
+            url = base + ("?" + "&".join(parts) if parts else "")
+        params = {"url": url, "host": url}
+        if auth_token:
+            params["auth_token"] = auth_token
+        return params
 
     if "://" in dsn:
         u = urlparse(dsn)
@@ -258,6 +301,30 @@ def connect(driver, params, timeout):
             autocommit=False,
         )
 
+    if driver == "sqlite":
+        import sqlite3
+
+        # URI mode with mode=ro: fails if the file does not exist, and the
+        # server rejects any write attempt with "attempt to write a readonly
+        # database". No PRAGMA needed — the file itself is read-only.
+        return sqlite3.connect(
+            f"file:{params['database']}?mode=ro", uri=True
+        )
+
+    if driver == "libsql":
+        try:
+            import libsql_client
+        except ImportError:
+            raise DbqError(
+                "libsql driver requires libsql-client. "
+                "Install it with: pip install 'dbq[libsql]'"
+            )
+
+        return libsql_client.create_client_sync(
+            url=params["url"],
+            auth_token=params.get("auth_token"),
+        )
+
     import pymysql
 
     conn = pymysql.connect(
@@ -327,6 +394,13 @@ def to_json(columns, rows, meta):
 
 
 def run(conn, driver, sql, max_rows):
+    if driver == "libsql":
+        result = conn.execute(sql)
+        columns = list(result.columns) if result.columns else []
+        all_rows = [list(r) for r in result.rows]
+        truncated = len(all_rows) > max_rows
+        return columns, all_rows[:max_rows], truncated
+
     cur = conn.cursor()
     cur.execute(sql)
     columns = [d[0] for d in cur.description] if cur.description else []
@@ -336,6 +410,8 @@ def run(conn, driver, sql, max_rows):
 
 
 def tables_sql(driver, schema):
+    if driver in ("sqlite", "libsql"):
+        return "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
     if driver == "oracle":
         owner = f"'{schema}'" if schema else "SYS_CONTEXT('USERENV','CURRENT_SCHEMA')"
         return f"SELECT table_name FROM all_tables WHERE owner = {owner} ORDER BY table_name"
@@ -354,6 +430,8 @@ def _std_schema(driver, schema):
 
 
 def describe_sql(driver, table, schema):
+    if driver in ("sqlite", "libsql"):
+        return f"SELECT name, type, \"notnull\" AS nullable FROM pragma_table_info('{table}')"
     if driver == "oracle":
         owner = f"'{schema}'" if schema else "SYS_CONTEXT('USERENV','CURRENT_SCHEMA')"
         return (
@@ -378,7 +456,8 @@ def describe_sql(driver, table, schema):
 
 def build_parser():
     p = argparse.ArgumentParser(
-        prog="dbq", description="read-only SQL against Oracle, MySQL, Postgres or SQL Server"
+        prog="dbq",
+        description="read-only SQL against Oracle, MySQL, Postgres, SQL Server, SQLite or libsql",
     )
     p.add_argument("--profile", help="profile name from config.toml")
     p.add_argument("--sql", help="SQL to run")
@@ -436,7 +515,9 @@ def main(argv=None):
         try:
             columns, rows, truncated = run(conn, driver, sql, args.max_rows)
         finally:
-            conn.rollback()  # end the read-only transaction explicitly
+            # libsql ClientSync has no rollback; sqlite3 and DB-API 2.0 do.
+            if hasattr(conn, "rollback"):
+                conn.rollback()
             conn.close()
 
         meta = {

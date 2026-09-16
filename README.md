@@ -2,12 +2,14 @@
 
 ![ci](https://github.com/gayanhewa/dbq/actions/workflows/ci.yml/badge.svg)
 
-Read-only SQL against Oracle, MySQL, Postgres or SQL Server, printing toon or
-json.
+Read-only SQL against Oracle, MySQL, Postgres, SQL Server, SQLite or libsql
+(including Turso), printing toon or json.
 
-One Python file, five pure-Python dependencies. No driver needs a native
-client library: `oracledb` runs in thin mode and speaks the Oracle wire
-protocol directly, and `pymysql`, `pg8000` and `python-tds` are pure Python.
+One Python file. No driver needs a native client library: `oracledb` runs in
+thin mode and speaks the Oracle wire protocol directly, and `pymysql`, `pg8000`,
+`python-tds` and `libsql-client` are pure Python. SQLite uses the stdlib
+`sqlite3` module, so no extra dependency is needed. The libsql driver requires
+`libsql-client` (install with `pip install 'dbq[libsql]'`).
 Built for coding agents to query real data safely, and pleasant enough for
 humans.
 
@@ -26,9 +28,10 @@ pipx install git+https://github.com/gayanhewa/dbq
 
 ## Read-only is enforced by the database
 
-On Oracle, MySQL and Postgres every query runs inside a read-only transaction:
-`SET TRANSACTION READ ONLY` on Oracle and Postgres, `START TRANSACTION READ
-ONLY` on MySQL. A write fails server-side even when the account has permission:
+On Oracle, MySQL, Postgres and SQLite every query runs inside a read-only
+transaction or connection: `SET TRANSACTION READ ONLY` on Oracle and
+Postgres, `START TRANSACTION READ ONLY` on MySQL, `URI mode=ro` on SQLite.
+A write fails server-side even when the account has permission:
 
 ```
 $ mysql -uroot ... -e "START TRANSACTION READ ONLY; DELETE FROM widget WHERE id=1;"
@@ -38,10 +41,17 @@ $ psql ... -c "BEGIN; SET TRANSACTION READ ONLY; DELETE FROM widget WHERE id=1;"
 ERROR:  cannot execute DELETE in a read-only transaction   (SQLSTATE 25006)
 ```
 
-That is the guarantee on those three. The SELECT-only check in `dbq` runs
-first, but only so the error is clearer than the driver's. It is not what makes
-this safe. Do not weaken the transaction mode on the assumption the string
-check will hold; SQL has too many ways to hide a write.
+That is the guarantee on those four. SQLite opens the database file itself in
+read-only mode (`URI mode=ro`), so the operating system rejects writes at the
+file level. The SELECT-only check in `dbq` runs first, but only so the error
+is clearer than the driver's. It is not what makes this safe. Do not weaken the
+transaction mode on the assumption the string check will hold; SQL has too many
+ways to hide a write.
+
+For libsql (Turso), read-only enforcement depends on the server token
+permissions. The `libsql-client` library sends all queries through the provided
+token; a read-only token prevents writes server-side. The SELECT-only statement
+check still runs first as an additional guard.
 
 SQL Server is weaker. It has no read-only transaction mode. There, `dbq` opens
 an explicit transaction and always rolls it back, whatever happened inside it.
@@ -80,10 +90,16 @@ env_file = "~/code/legacy/.env"
 env_var  = "SQL_CONNECTION"           # e.g. Server=host,1433;Database=app;User Id=ro;Password=pw
 ```
 
-`driver` is one of `oracle`, `mysql`, `postgres` or `sqlserver`. A profile
-either carries `dsn` inline or names an existing `.env` to read it from.
-Pointing at a `.env` you already have avoids a second copy of the same
-credential going stale.
+`driver` is one of `oracle`, `mysql`, `postgres`, `sqlserver`, `sqlite` or
+`libsql`. A profile either carries `dsn` inline or names an existing `.env` to
+read it from. Pointing at a `.env` you already have avoids a second copy of the
+same credential going stale.
+
+For `sqlite`, the DSN is a file path (absolute, relative, or `~/expanded`). For
+`libsql`, the DSN is a URL like `libsql://my-db.turso.io` or
+`file:///path/to/db.sqlite`; the optional auth token can come from the
+`authToken` query parameter or from `env_file` + `env_var` (which reads the
+token, not the DSN).
 
 ## Use
 
@@ -98,16 +114,20 @@ dbq --profile work --file query.sql --json
 dbq --driver mysql --dsn 'mysql://root:pw@127.0.0.1:3306/app' --sql 'SELECT 1'
 dbq --driver postgres --dsn 'postgres://reader:pw@127.0.0.1:5432/app' --sql 'SELECT 1'
 dbq --driver sqlserver --dsn 'Server=127.0.0.1,1433;Database=app;User Id=sa;Password=pw' --sql 'SELECT 1'
+dbq --driver sqlite --dsn ~/data/app.db --sql 'SELECT * FROM users'
+dbq --driver libsql --dsn 'libsql://my-db.turso.io?authToken=xxx' --sql 'SELECT 1'
 dbq --driver oracle --env-file ./.env --env-var ORACLE_CONNECTION --sql '...'
 ```
 
 Multi-line SQL goes in a file. Passing it through shell quoting is how it ends
 up mangled.
 
-`--tables` and `--describe` work on all four drivers. Oracle reads
-`all_tables` and `all_tab_columns`; the other three read `information_schema`.
-Postgres compares the table name case-insensitively. SQL Server looks in the
-login's default schema, usually `dbo`, unless the profile sets `schema`.
+`--tables` and `--describe` work on all six drivers. Oracle reads
+`all_tables` and `all_tab_columns`; Postgres, MySQL and SQL Server read
+`information_schema`; SQLite and libsql read `sqlite_master` and
+`pragma_table_info`. Postgres compares the table name case-insensitively.
+SQL Server looks in the login's default schema, usually `dbo`, unless the
+profile sets `schema`.
 
 ## Connection string formats
 
@@ -120,6 +140,8 @@ All of these parse, so you can point at whatever the app already uses:
 | URL | `mysql://root:pw@127.0.0.1:3306/appdb` |
 | URL | `postgres://user:pw@host:5432/db` (also `postgresql://`) |
 | URL | `mssql://user:pw@host:1433/db` (also `sqlserver://`) |
+| File path | `/path/to/app.db` or `sqlite:///path/to/app.db` |
+| libsql URL | `libsql://my-db.turso.io?authToken=xxx` or `file:///path/to/db.sqlite` |
 | Oracle EZ-connect | `scott/tiger@host:1521/ORCLPDB1` |
 
 `Server`, `Initial Catalog`, `Uid`, `Pwd` and friends are accepted as aliases.
@@ -129,7 +151,8 @@ The SQL Server .NET form puts a comma, not a colon, before the port.
 trusted authentication is not supported; use a SQL login.
 
 When the port is missing, the driver's default applies: 1521 for Oracle, 3306
-for MySQL, 5432 for Postgres, 1433 for SQL Server.
+for MySQL, 5432 for Postgres, 1433 for SQL Server. SQLite and libsql do not
+use ports.
 
 ## Output
 
@@ -185,6 +208,9 @@ consumer can link it straight out of the store.
 
 GitHub Actions runs on every push: unit tests first, then integration tests
 against real Postgres, MySQL, SQL Server and Oracle containers.
+SQLite integration tests run inline without a container (stdlib `sqlite3`).
+libsql integration tests use a local file via `file://` (no Turso server
+required).
 
 ## Notes
 

@@ -5,7 +5,7 @@ build-backend = "flit_core.buildapi"
 [project]
 name = "dbq"
 version = "0.1.0"
-description = "Read-only SQL against Oracle, MySQL, Postgres or SQL Server, with agent-friendly output"
+description = "Read-only SQL against Oracle, MySQL, Postgres, SQL Server, SQLite or libsql, with agent-friendly output"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
@@ -16,6 +16,9 @@ dependencies = [
   "python-tds>=1.16",
   "python-dotenv>=1",
 ]
+
+[project.optional-dependencies]
+libsql = ["libsql-client>=0.3"]
 
 [project.urls]
 Repository = "https://github.com/gayanhewa/dbq"

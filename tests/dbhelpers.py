@@ -10,6 +10,8 @@ ENV_VARS = {
     "mysql": "DBQ_TEST_MYSQL",
     "postgres": "DBQ_TEST_POSTGRES",
     "sqlserver": "DBQ_TEST_SQLSERVER",
+    "sqlite": "DBQ_TEST_SQLITE",
+    "libsql": "DBQ_TEST_LIBSQL",
 }
 
 # Token the server puts in its error when a write hits the read-only transaction.
@@ -17,6 +19,7 @@ READONLY_ERROR_TOKEN = {
     "oracle": "ORA-01456",
     "mysql": "1792",
     "postgres": "25006",
+    "sqlite": "cannot change",
 }
 
 
@@ -70,6 +73,20 @@ def connect_autocommit(driver, dsn, timeout=10):
             login_timeout=timeout,
             autocommit=True,
         )
+    if driver == "sqlite":
+        import sqlite3
+
+        # isolation_level=None enables autocommit so INSERTs land immediately
+        conn = sqlite3.connect(p["database"], isolation_level=None)
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
+    if driver == "libsql":
+        import libsql_client
+
+        return libsql_client.create_client_sync(
+            url=p["url"],
+            auth_token=p.get("auth_token"),
+        )
     raise ValueError(driver)
 
 
@@ -87,20 +104,29 @@ def wait_for_db(driver, dsn, deadline_s=180):
 
 
 def execute(conn, sql):
-    cur = conn.cursor()
-    try:
-        cur.execute(sql)
-    finally:
-        cur.close()
+    if hasattr(conn, "cursor"):
+        cur = conn.cursor()
+        try:
+            cur.execute(sql)
+        finally:
+            cur.close()
+    else:
+        # libsql ClientSync: execute returns a ResultSet directly.
+        conn.execute(sql)
 
 
 def fetchall(conn, sql):
-    cur = conn.cursor()
-    try:
-        cur.execute(sql)
-        return [tuple(r) for r in cur.fetchall()]
-    finally:
-        cur.close()
+    if hasattr(conn, "cursor"):
+        cur = conn.cursor()
+        try:
+            cur.execute(sql)
+            return [tuple(r) for r in cur.fetchall()]
+        finally:
+            cur.close()
+    else:
+        # libsql ClientSync
+        result = conn.execute(sql)
+        return [tuple(r) for r in result.rows]
 
 
 def create_widget(driver, conn):
@@ -120,4 +146,7 @@ def create_widget(driver, conn):
 
 
 def drop_widget(conn):
-    execute(conn, "DROP TABLE dbq_widget")
+    try:
+        execute(conn, "DROP TABLE dbq_widget")
+    except Exception:
+        pass
