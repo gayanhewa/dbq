@@ -1,0 +1,8 @@
+Port 2222
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+AllowUsers dbq
+AllowTcpForwarding yes
+GatewayPorts no
+PidFile /run/sshd.pid

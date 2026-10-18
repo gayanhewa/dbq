@@ -257,3 +257,77 @@ def test_libsql_describe(libsql_db, capsys):
     assert (code, err) == (0, "")
     lines = out.splitlines()
     assert "count: 3" in lines
+
+
+# --- ssh tunnel (needs a bastion container) ---------------------------------
+
+SSH_TUNNEL_ENV = "DBQ_TEST_SSH_TUNNEL"
+SSH_KEY_ENV = "DBQ_TEST_SSH_KEY"
+POSTGRES_TUNNEL_ENV = "DBQ_TEST_POSTGRES_TUNNEL"
+
+
+@pytest.fixture(scope="module")
+def ssh_tunnel_db(tmp_path_factory):
+    """Postgres through a real sshd. CI adds the bastion host key to
+    ~/.ssh/known_hosts before running the suite."""
+    target = os.environ.get(SSH_TUNNEL_ENV)
+    key_file = os.environ.get(SSH_KEY_ENV)
+    tunnel_dsn = os.environ.get(POSTGRES_TUNNEL_ENV)
+    direct_dsn = os.environ.get(dbhelpers.ENV_VARS["postgres"])
+
+    missing = [
+        name
+        for name, value in (
+            (SSH_TUNNEL_ENV, target),
+            (SSH_KEY_ENV, key_file),
+            (POSTGRES_TUNNEL_ENV, tunnel_dsn),
+            (dbhelpers.ENV_VARS["postgres"], direct_dsn),
+        )
+        if not value
+    ]
+    if missing:
+        pytest.skip(f"{', '.join(missing)} not set")
+
+    user, _, host_port = target.rpartition("@")
+    host, _, port = host_port.rpartition(":")
+    if not (user and host and port.isdigit()):
+        pytest.skip(f"{SSH_TUNNEL_ENV} must be user@host:port")
+
+    config = tmp_path_factory.mktemp("dbq-ssh") / "config.toml"
+    config.write_text(
+        f"""
+[profiles.tunnel]
+driver = "postgres"
+dsn = {json.dumps(tunnel_dsn)}
+
+[profiles.tunnel.ssh_tunnel]
+host = {json.dumps(host)}
+port = {int(port)}
+user = {json.dumps(user)}
+key_file = {json.dumps(key_file)}
+"""
+    )
+
+    conn = dbhelpers.wait_for_db("postgres", direct_dsn)
+    dbhelpers.create_widget("postgres", conn)
+    try:
+        yield config, dbq.parse_dsn(tunnel_dsn, "postgres")["host"], f"{user}@{host}"
+    finally:
+        try:
+            dbhelpers.drop_widget(conn)
+        finally:
+            conn.close()
+
+
+def test_postgres_over_ssh_tunnel(ssh_tunnel_db, monkeypatch, capsys):
+    config, db_host, ssh_dest = ssh_tunnel_db
+    monkeypatch.setattr(dbq, "CONFIG_PATH", config)
+
+    code = dbq.main(["--profile", "tunnel", "--sql", SELECT_ALL])
+    captured = capsys.readouterr()
+
+    assert code == 0, captured.err
+    lines = captured.out.splitlines()
+    assert f"host: {db_host}" in lines
+    assert f"tunnel: {ssh_dest}" in lines
+    assert lines[-1] == "  3,gamma,x"
