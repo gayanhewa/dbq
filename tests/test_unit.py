@@ -1,4 +1,6 @@
+import io
 import json
+import sqlite3
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -488,3 +490,321 @@ def test_main_sql_from_file(config, capsys, tmp_path):
 def test_config_path_comes_from_env():
     # conftest sets DBQ_CONFIG before dbq is imported.
     assert dbq.CONFIG_PATH == Path("/nonexistent/dbq-tests/config.toml")
+
+
+# --- ssh tunnel --------------------------------------------------------------
+
+TUNNEL_CONFIG = """
+[profiles.pg]
+driver = "postgres"
+dsn    = "postgres://reader:pw@db.internal:5432/app"
+
+[profiles.pg.ssh_tunnel]
+host     = "bastion.example.com"
+port     = 2222
+user     = "deploy"
+key_file = "~/.ssh/id_ed25519"
+"""
+
+
+@pytest.fixture
+def tunnel_config(tmp_path, monkeypatch):
+    path = tmp_path / "config.toml"
+    path.write_text(TUNNEL_CONFIG)
+    monkeypatch.setattr(dbq, "CONFIG_PATH", path)
+    return path
+
+
+@pytest.fixture
+def sqlite_tunnel_config(tmp_path, monkeypatch):
+    db_path = tmp_path / "app.db"
+    sqlite3.connect(str(db_path)).close()
+    path = tmp_path / "config.toml"
+    path.write_text(
+        f"""
+[profiles.local]
+driver = "sqlite"
+dsn    = "{db_path}"
+
+[profiles.local.ssh_tunnel]
+host = "bastion.example.com"
+"""
+    )
+    monkeypatch.setattr(dbq, "CONFIG_PATH", path)
+    return path
+
+
+def test_resolve_tunnel_absent_returns_none():
+    assert dbq.resolve_tunnel({"name": "p", "driver": "postgres"}) is None
+    assert dbq.resolve_tunnel({"name": "p", "driver": "postgres", "ssh_tunnel": {}}) is None
+
+
+def test_resolve_tunnel_reads_profile():
+    profile = {
+        "name": "pg",
+        "driver": "postgres",
+        "ssh_tunnel": {"host": "bastion", "user": "deploy", "key_file": "~/k"},
+    }
+    got = dbq.resolve_tunnel(profile)
+    assert got == {
+        "host": "bastion",
+        "port": 22,
+        "user": "deploy",
+        "key_file": str(Path("~/k").expanduser()),
+    }
+
+
+@pytest.mark.parametrize(
+    "tunnel, match",
+    [
+        ({"host": "bastion", "nope": 1}, "unknown ssh_tunnel"),
+        ({"user": "deploy"}, "needs a host"),
+        ({"host": "deploy@bastion"}, "put the ssh user"),
+        ({"host": "bastion", "port": "nope"}, "port must be a number"),
+        ({"host": "bastion", "port": 70000}, "between 1 and 65535"),
+        ({"host": "bastion", "user": ""}, "user must be a non-empty string"),
+        ({"host": "bastion", "key_file": ""}, "key_file must be a path"),
+    ],
+)
+def test_resolve_tunnel_rejects_bad_config(tunnel, match):
+    profile = {"name": "p", "driver": "postgres", "ssh_tunnel": tunnel}
+    with pytest.raises(DbqError, match=match):
+        dbq.resolve_tunnel(profile)
+
+
+def test_resolve_tunnel_rejects_non_table():
+    profile = {"name": "p", "driver": "postgres", "ssh_tunnel": "bastion"}
+    with pytest.raises(DbqError, match="must be a table"):
+        dbq.resolve_tunnel(profile)
+
+
+@pytest.mark.parametrize("driver", ["sqlite", "libsql"])
+def test_resolve_tunnel_rejects_local_drivers(driver):
+    profile = {"name": "p", "driver": driver, "ssh_tunnel": {"host": "bastion"}}
+    with pytest.raises(DbqError, match="not supported"):
+        dbq.resolve_tunnel(profile)
+
+
+def test_tunnel_command_forwards_to_dsn_host():
+    cmd = dbq.tunnel_command(
+        "/usr/bin/ssh",
+        {"host": "db.internal", "port": 5432},
+        {"host": "bastion", "port": 2222, "user": "deploy", "key_file": "/k"},
+        4567,
+        30,
+    )
+    assert cmd[0] == "/usr/bin/ssh"
+    assert "-N" in cmd
+    assert "BatchMode=yes" in cmd
+    assert "ExitOnForwardFailure=yes" in cmd
+    assert "ConnectTimeout=30" in cmd
+    assert "127.0.0.1:4567:db.internal:5432" in cmd
+    assert cmd[cmd.index("-p") + 1] == "2222"
+    assert cmd[cmd.index("-i") + 1] == "/k"
+    assert cmd[-2] == "--"
+    assert cmd[-1] == "deploy@bastion"
+
+
+def test_tunnel_command_omits_optional_arguments():
+    cmd = dbq.tunnel_command(
+        "ssh", {"host": "db.internal", "port": 5432}, {"host": "bastion", "port": 22}, 4567, 5
+    )
+    assert "-i" not in cmd
+    assert cmd[-1] == "bastion"
+
+
+def test_tunnel_command_brackets_ipv6_database_hosts():
+    cmd = dbq.tunnel_command(
+        "ssh", {"host": "::1", "port": 5432}, {"host": "bastion", "port": 22}, 4567, 5
+    )
+    assert "127.0.0.1:4567:[::1]:5432" in cmd
+
+
+class _FakeProc:
+    def __init__(self, returncode=None, stderr=""):
+        self.returncode = returncode
+        self.pid = 12345
+        self.stderr = io.StringIO(stderr)
+        self.terminated = False
+        self.killed = False
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = 0
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+def test_start_tunnel_requires_ssh(monkeypatch):
+    monkeypatch.setattr(dbq.shutil, "which", lambda _: None)
+    with pytest.raises(DbqError, match="no ssh binary"):
+        dbq.start_tunnel({"host": "db.internal", "port": 5432}, {"host": "bastion", "port": 22}, 5)
+
+
+def test_start_tunnel_reports_ssh_failure(monkeypatch):
+    proc = _FakeProc(returncode=255, stderr="ssh: Could not resolve hostname bastion")
+    monkeypatch.setattr(dbq.shutil, "which", lambda _: "/usr/bin/ssh")
+    monkeypatch.setattr(dbq, "_free_port", lambda: 4567)
+    monkeypatch.setattr(dbq.subprocess, "Popen", lambda *a, **k: proc)
+
+    with pytest.raises(DbqError, match="Could not resolve hostname bastion"):
+        dbq.start_tunnel(
+            {"host": "db.internal", "port": 5432}, {"host": "bastion", "port": 22}, 5
+        )
+    assert proc.stderr.closed
+
+
+def test_start_tunnel_times_out(monkeypatch):
+    proc = _FakeProc()
+    monkeypatch.setattr(dbq.shutil, "which", lambda _: "/usr/bin/ssh")
+    monkeypatch.setattr(dbq, "_free_port", lambda: 4567)
+    monkeypatch.setattr(dbq, "_port_open", lambda port: False)
+    monkeypatch.setattr(dbq.subprocess, "Popen", lambda *a, **k: proc)
+
+    with pytest.raises(DbqError, match="did not open"):
+        dbq.start_tunnel(
+            {"host": "db.internal", "port": 5432}, {"host": "bastion", "port": 22}, -1
+        )
+    assert proc.terminated
+    assert proc.stderr.closed
+
+
+def test_start_tunnel_returns_once_local_port_is_open(monkeypatch):
+    proc = _FakeProc()
+    monkeypatch.setattr(dbq.shutil, "which", lambda _: "/usr/bin/ssh")
+    monkeypatch.setattr(dbq, "_free_port", lambda: 4567)
+    monkeypatch.setattr(dbq, "_port_open", lambda port: True)
+    monkeypatch.setattr(dbq.subprocess, "Popen", lambda *a, **k: proc)
+
+    tunnel = dbq.start_tunnel(
+        {"host": "db.internal", "port": 5432},
+        {"host": "bastion", "port": 22, "user": "deploy"},
+        5,
+    )
+    assert tunnel.local_port == 4567
+    assert tunnel.destination == "deploy@bastion"
+
+    tunnel.close()
+    assert proc.terminated
+    assert proc.stderr.closed
+
+
+def test_start_tunnel_runs_a_real_process(monkeypatch, tmp_path):
+    fake = tmp_path / "ssh"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import socket, sys, time\n"
+        "args = sys.argv[1:]\n"
+        'spec = args[args.index("-L") + 1]\n'
+        'local = int(spec.split(":")[1])\n'
+        "sock = socket.socket()\n"
+        "sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+        'sock.bind(("127.0.0.1", local))\n'
+        "sock.listen()\n"
+        "time.sleep(30)\n"
+    )
+    fake.chmod(0o755)
+    monkeypatch.setattr(dbq.shutil, "which", lambda _: str(fake))
+
+    tunnel = dbq.start_tunnel(
+        {"host": "db.internal", "port": 5432}, {"host": "bastion", "port": 22}, 5
+    )
+    try:
+        assert tunnel.local_port > 0
+        assert tunnel.proc.poll() is None
+    finally:
+        tunnel.close()
+    assert tunnel.proc.poll() is not None
+
+
+class _FakeConn:
+    def __init__(self):
+        self.rolled = False
+        self.closed = False
+
+    def rollback(self):
+        self.rolled = True
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeTunnel:
+    local_port = 4567
+    destination = "deploy@bastion.example.com"
+
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+def test_main_connects_through_tunnel(tunnel_config, monkeypatch, capsys):
+    seen = {}
+    conn = _FakeConn()
+    tunnel = _FakeTunnel()
+
+    def fake_connect(driver, params, timeout):
+        seen.update(params)
+        return conn
+
+    monkeypatch.setattr(dbq, "start_tunnel", lambda params, cfg, timeout: tunnel)
+    monkeypatch.setattr(dbq, "connect", fake_connect)
+    monkeypatch.setattr(
+        dbq, "run", lambda conn, driver, sql, max_rows: (["n"], [[1]], False)
+    )
+
+    code, out, err = _run(capsys, ["--profile", "pg", "--sql", "SELECT 1"])
+
+    assert code == 0, err
+    assert seen["host"] == "127.0.0.1"
+    assert seen["port"] == 4567
+    assert "host: db.internal" in out.splitlines()
+    assert "tunnel: deploy@bastion.example.com" in out.splitlines()
+    assert tunnel.closed
+    assert conn.rolled and conn.closed
+
+
+def test_main_no_ssh_tunnel_flag_skips_tunnel(sqlite_tunnel_config, capsys):
+    code, out, err = _run(
+        capsys,
+        ["--profile", "local", "--no-ssh-tunnel", "--sql", "SELECT 1 AS greeting"],
+    )
+    assert code == 0, err
+    assert "tunnel:" not in out
+    assert "greeting" in out
+
+
+def test_main_rejects_tunnel_for_sqlite(sqlite_tunnel_config, capsys):
+    code, out, err = _run(capsys, ["--profile", "local", "--sql", "SELECT 1"])
+    assert code == 2
+    assert out == ""
+    assert "ssh_tunnel is not supported" in err
+
+
+def test_main_closes_tunnel_when_query_fails(tunnel_config, monkeypatch, capsys):
+    conn = _FakeConn()
+    tunnel = _FakeTunnel()
+
+    def boom(*args):
+        raise DbqError("query failed")
+
+    monkeypatch.setattr(dbq, "start_tunnel", lambda params, cfg, timeout: tunnel)
+    monkeypatch.setattr(dbq, "connect", lambda *args: conn)
+    monkeypatch.setattr(dbq, "run", boom)
+
+    code, _, err = _run(capsys, ["--profile", "pg", "--sql", "SELECT 1"])
+
+    assert code == 2
+    assert "query failed" in err
+    assert tunnel.closed
+    assert conn.rolled and conn.closed

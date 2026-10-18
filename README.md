@@ -88,6 +88,16 @@ schema = "public"
 driver   = "sqlserver"
 env_file = "~/code/legacy/.env"
 env_var  = "SQL_CONNECTION"           # e.g. Server=host,1433;Database=app;User Id=ro;Password=pw
+
+[profiles.prod]
+driver = "postgres"
+dsn    = "postgres://reader:pw@db.internal:5432/app"
+
+[profiles.prod.ssh_tunnel]            # optional, see SSH tunnels below
+host     = "bastion.example.com"
+port     = 22                         # optional, default 22
+user     = "deploy"                   # optional
+key_file = "~/.ssh/id_ed25519"        # optional
 ```
 
 `driver` is one of `oracle`, `mysql`, `postgres`, `sqlserver`, `sqlite` or
@@ -154,6 +164,45 @@ When the port is missing, the driver's default applies: 1521 for Oracle, 3306
 for MySQL, 5432 for Postgres, 1433 for SQL Server. SQLite and libsql do not
 use ports.
 
+## SSH tunnels
+
+When the database only listens on a private network, add an `ssh_tunnel` table
+to the profile. `dbq` starts `ssh -N -L` and points the driver at the local end
+of the tunnel. The table is optional; without it nothing changes.
+
+```toml
+[profiles.prod]
+driver = "postgres"
+dsn    = "postgres://reader:pw@db.internal:5432/app"
+
+[profiles.prod.ssh_tunnel]
+host     = "bastion.example.com"
+port     = 22                   # optional, default 22
+user     = "deploy"             # optional
+key_file = "~/.ssh/id_ed25519"  # optional
+```
+
+`host` is the only required field. `dbq` calls the system `ssh` binary, so it
+must be on PATH. Your normal OpenSSH configuration applies: keys, agent,
+`known_hosts` and `ProxyJump` all keep working. It runs with
+`BatchMode=yes`, so authentication has to succeed without a prompt. Unlock the
+key with `ssh-agent` first.
+
+The DSN host and port are resolved from the bastion, not from your machine.
+The output header still shows the real database host and adds a `tunnel:` line
+when a tunnel was used.
+
+`--no-ssh-tunnel` ignores the table for one run. That is useful when the
+bastion is down and you have a direct route.
+
+Tunnels work with `oracle`, `mysql`, `postgres` and `sqlserver`. `sqlite` and
+`libsql` profiles cannot use one.
+
+TLS note: the driver connects to `127.0.0.1`, so certificate checks that require
+the original database hostname can fail. This is most likely with SQL Server
+`Encrypt=true` and Postgres `verify-full`. `dbq` does not turn off certificate
+verification.
+
 ## Output
 
 toon by default: a header naming the columns once, then bare rows. That costs
@@ -218,4 +267,5 @@ required).
   query, and error output has `password=` scrubbed before printing, because
   drivers sometimes echo the connection string in exceptions.
 - The transaction is rolled back and the connection closed on every path,
-  including errors.
+  including errors. When a profile uses an SSH tunnel, the tunnel process is
+  closed on every path too.
