@@ -80,6 +80,47 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e '.[libsql]' pytest pg8000 python-tds
+
+      - name: Start SSH bastion
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dbq-ssh/context"
+          ssh-keygen -t ed25519 -N '' -f "$RUNNER_TEMP/dbq-ssh/id_ed25519" -C dbq-test
+          cp tests/ssh/Dockerfile tests/ssh/sshd_config "$RUNNER_TEMP/dbq-ssh/context/"
+          cp "$RUNNER_TEMP/dbq-ssh/id_ed25519.pub" "$RUNNER_TEMP/dbq-ssh/context/authorized_keys"
+          docker build -t dbq-ssh "$RUNNER_TEMP/dbq-ssh/context"
+          docker run -d --name dbq-ssh \
+            -p 127.0.0.1:2222:2222 \
+            --add-host=host.docker.internal:host-gateway \
+            dbq-ssh
+
+          ready=0
+          for _ in $(seq 1 30); do
+            ssh-keyscan -p 2222 127.0.0.1 > "$RUNNER_TEMP/dbq-ssh/known_hosts" 2>/dev/null || true
+            if ssh -i "$RUNNER_TEMP/dbq-ssh/id_ed25519" -p 2222 \
+                 -o BatchMode=yes -o StrictHostKeyChecking=yes \
+                 -o UserKnownHostsFile="$RUNNER_TEMP/dbq-ssh/known_hosts" \
+                 dbq@127.0.0.1 true; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            docker logs dbq-ssh
+            exit 1
+          fi
+
+          mkdir -p ~/.ssh
+          cat "$RUNNER_TEMP/dbq-ssh/known_hosts" >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+          {
+            echo "DBQ_TEST_SSH_TUNNEL=dbq@127.0.0.1:2222"
+            echo "DBQ_TEST_SSH_KEY=$RUNNER_TEMP/dbq-ssh/id_ed25519"
+            echo "DBQ_TEST_POSTGRES_TUNNEL=postgres://postgres:dbqtest@host.docker.internal:5432/app"
+          } >> "$GITHUB_ENV"
+
       - run: pytest tests/test_integration.py -v
 
   nix:

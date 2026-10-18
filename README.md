@@ -259,7 +259,8 @@ GitHub Actions runs on every push: unit tests first, then integration tests
 against real Postgres, MySQL, SQL Server and Oracle containers.
 SQLite integration tests run inline without a container (stdlib `sqlite3`).
 libsql integration tests use a local file via `file://` (no Turso server
-required).
+required). The integration job also starts a small Alpine `sshd` container and
+runs one Postgres query through a real SSH tunnel.
 
 ## Notes
 

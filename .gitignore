@@ -2,3 +2,4 @@ __pycache__/
 dist/
 result
 .venv/
+tests/ssh/authorized_keys
