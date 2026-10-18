@@ -31,6 +31,11 @@ Run `dbq --list-profiles` to see what exists. Never invent a profile name, and
 never pass `--dsn` with a credential you found in a file: that puts it in the
 transcript. If a database is not in a profile, say so and let the user add it.
 
+Some profiles reach the database through an SSH tunnel. `dbq` opens it for
+you, so do not add your own port forwarding or `ssh` flags. A `tunnel:` line in
+the output means the tunnel was used. If the tunnel fails, report the error;
+do not retry with `--no-ssh-tunnel` unless the user asks.
+
 ## Finding your way around
 
 Guessing column names is the most common cause of a wrong query. Two calls

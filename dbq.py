@@ -13,6 +13,9 @@ Credentials are never written anywhere. A profile either carries a dsn inline
 or names an existing .env to read it from, and the value is held in memory for
 one query.
 
+An optional ssh_tunnel table sends the connection through a bastion. It is
+only used when the table is present; --no-ssh-tunnel skips it for one run.
+
 Config: ~/.config/dbq/config.toml (override with DBQ_CONFIG)
 
     default = "work"
@@ -45,13 +48,27 @@ Config: ~/.config/dbq/config.toml (override with DBQ_CONFIG)
     dsn      = "libsql://my-db.turso.io"
     env_file = "~/.turso/env"
     env_var  = "TURSO_AUTH_TOKEN"      # reads the auth token, not the DSN
+
+    [profiles.prod]
+    driver = "postgres"
+    dsn    = "postgres://reader:pw@db.internal:5432/app"
+
+    [profiles.prod.ssh_tunnel]         # optional
+    host     = "bastion.example.com"
+    port     = 22                      # optional, default 22
+    user     = "deploy"                # optional
+    key_file = "~/.ssh/id_ed25519"     # optional
 """
 
 import argparse
 import json
 import os
 import re
+import shutil
+import socket
+import subprocess
 import sys
+import time
 import tomllib
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -245,6 +262,173 @@ def parse_dsn(dsn, driver):
         raise DbqError("connection string has no host")
     params["port"] = int(params["port"]) if params.get("port") else DEFAULT_PORTS[driver]
     return params
+
+
+# --- ssh tunnel -------------------------------------------------------------
+
+SSH_TUNNEL_KEYS = ("host", "port", "user", "key_file")
+
+
+def resolve_tunnel(profile):
+    """Return a validated tunnel config, or None when the profile has none."""
+    raw = profile.get("ssh_tunnel")
+    if not raw:
+        return None
+
+    name = profile["name"]
+    if not isinstance(raw, dict):
+        raise DbqError(f"profile {name!r}: ssh_tunnel must be a table")
+
+    unknown = sorted(set(raw) - set(SSH_TUNNEL_KEYS))
+    if unknown:
+        raise DbqError(
+            f"profile {name!r}: unknown ssh_tunnel key(s) {', '.join(unknown)}, "
+            f"expected one of {', '.join(SSH_TUNNEL_KEYS)}"
+        )
+
+    if profile["driver"] in ("sqlite", "libsql"):
+        raise DbqError(
+            f"profile {name!r}: ssh_tunnel is not supported for the "
+            f"{profile['driver']} driver"
+        )
+
+    host = raw.get("host")
+    if not isinstance(host, str) or not host.strip():
+        raise DbqError(f"profile {name!r}: ssh_tunnel needs a host")
+    host = host.strip()
+    if "@" in host:
+        raise DbqError(
+            f"profile {name!r}: put the ssh user in ssh_tunnel.user, not in host"
+        )
+
+    port = raw.get("port", 22)
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        raise DbqError(f"profile {name!r}: ssh_tunnel.port must be a number")
+    if not 1 <= port <= 65535:
+        raise DbqError(f"profile {name!r}: ssh_tunnel.port must be between 1 and 65535")
+
+    tunnel = {"host": host, "port": port}
+
+    user = raw.get("user")
+    if user is not None:
+        if not isinstance(user, str) or not user.strip():
+            raise DbqError(
+                f"profile {name!r}: ssh_tunnel.user must be a non-empty string"
+            )
+        tunnel["user"] = user.strip()
+
+    key_file = raw.get("key_file")
+    if key_file is not None:
+        if not isinstance(key_file, str) or not key_file.strip():
+            raise DbqError(f"profile {name!r}: ssh_tunnel.key_file must be a path")
+        tunnel["key_file"] = str(Path(key_file).expanduser())
+
+    return tunnel
+
+
+def _tunnel_destination(tunnel):
+    if tunnel.get("user"):
+        return f"{tunnel['user']}@{tunnel['host']}"
+    return tunnel["host"]
+
+
+def tunnel_command(ssh, params, tunnel, local_port, timeout):
+    """Build the ssh command that forwards a local port to the database."""
+    remote_host = params["host"]
+    if ":" in remote_host and not remote_host.startswith("["):
+        remote_host = f"[{remote_host}]"
+    cmd = [
+        ssh,
+        "-N",
+        "-o", "BatchMode=yes",
+        "-o", "ExitOnForwardFailure=yes",
+        "-o", f"ConnectTimeout={max(1, int(timeout))}",
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=3",
+        "-L", f"127.0.0.1:{local_port}:{remote_host}:{params['port']}",
+        "-p", str(tunnel["port"]),
+    ]
+    if tunnel.get("key_file"):
+        cmd += ["-i", tunnel["key_file"]]
+    cmd += ["--", _tunnel_destination(tunnel)]
+    return cmd
+
+
+def _free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _port_open(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.25)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _stop_process(proc):
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    if proc.stderr:
+        proc.stderr.close()
+
+
+class Tunnel:
+    def __init__(self, proc, local_port, destination):
+        self.proc = proc
+        self.local_port = local_port
+        self.destination = destination
+
+    def close(self):
+        _stop_process(self.proc)
+
+
+def start_tunnel(params, tunnel, timeout):
+    """Open ssh -L and wait until the local end accepts connections."""
+    ssh = shutil.which("ssh")
+    if not ssh:
+        raise DbqError("ssh_tunnel is configured but no ssh binary was found on PATH")
+
+    destination = _tunnel_destination(tunnel)
+    local_port = _free_port()
+    cmd = tunnel_command(ssh, params, tunnel, local_port, timeout)
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+    except OSError as e:
+        raise DbqError(f"could not start ssh for the tunnel: {e}")
+
+    try:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            code = proc.poll()
+            if code is not None:
+                err = (proc.stderr.read() or "").strip() if proc.stderr else ""
+                detail = f": {err}" if err else ""
+                raise DbqError(
+                    f"ssh tunnel to {destination} exited with status {code}{detail}"
+                )
+            if _port_open(local_port):
+                return Tunnel(proc, local_port, destination)
+            time.sleep(0.05)
+        raise DbqError(f"ssh tunnel to {destination} did not open within {timeout}s")
+    except BaseException:
+        _stop_process(proc)
+        raise
 
 
 # --- connect + read-only ----------------------------------------------------
@@ -469,6 +653,11 @@ def build_parser():
     p.add_argument("--schema", help="value substituted for {{schema}}")
     p.add_argument("--max-rows", type=int, default=DEFAULT_MAX_ROWS)
     p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    p.add_argument(
+        "--no-ssh-tunnel",
+        action="store_true",
+        help="ignore any ssh_tunnel in the profile",
+    )
     p.add_argument("--json", action="store_true", help="json instead of toon")
     p.add_argument("--tables", action="store_true", help="list tables")
     p.add_argument("--describe", metavar="TABLE", help="show a table's columns")
@@ -511,21 +700,36 @@ def main(argv=None):
         sql = check_select_only(sql)
 
         params = parse_dsn(read_dsn(profile), driver)
-        conn = connect(driver, params, args.timeout)
+        tunnel = None
         try:
-            columns, rows, truncated = run(conn, driver, sql, args.max_rows)
+            tunnel_cfg = None if args.no_ssh_tunnel else resolve_tunnel(profile)
+            connect_params = params
+            if tunnel_cfg:
+                tunnel = start_tunnel(params, tunnel_cfg, args.timeout)
+                connect_params = dict(
+                    params, host="127.0.0.1", port=tunnel.local_port
+                )
+
+            conn = connect(driver, connect_params, args.timeout)
+            try:
+                columns, rows, truncated = run(conn, driver, sql, args.max_rows)
+            finally:
+                # libsql ClientSync has no rollback; sqlite3 and DB-API 2.0 do.
+                if hasattr(conn, "rollback"):
+                    conn.rollback()
+                conn.close()
         finally:
-            # libsql ClientSync has no rollback; sqlite3 and DB-API 2.0 do.
-            if hasattr(conn, "rollback"):
-                conn.rollback()
-            conn.close()
+            if tunnel is not None:
+                tunnel.close()
 
         meta = {
             "profile": profile["name"],
             "driver": driver,
             "host": params["host"],
-            "count": len(rows),
         }
+        if tunnel is not None:
+            meta["tunnel"] = tunnel.destination
+        meta["count"] = len(rows)
         if schema:
             meta["schema"] = schema
         if truncated:
